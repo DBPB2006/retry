@@ -7,9 +7,6 @@ class TicketCategory(models.Model):
     description = models.TextField(blank=True, default='')
     icon = models.CharField(max_length=50, blank=True, default='')
 
-    class Meta:
-        verbose_name_plural = 'Ticket Categories'
-        ordering = ['name']
 
     def __str__(self):
         return self.name

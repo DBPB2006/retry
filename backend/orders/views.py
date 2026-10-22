@@ -46,15 +46,14 @@ def create_checkout_order(request):
     is_direct = False
     item_id = None
 
-    if raw_id.startswith('res-'):
-        is_resale = True
-        item_id = int(raw_id[4:])
-    elif raw_id.startswith('dir-'):
-        is_direct = True
-        item_id = int(raw_id[4:])
-    else:
-        # Determine from numeric id
-        try:
+    try:
+        if raw_id.startswith('res-'):
+            is_resale = True
+            item_id = int(raw_id[4:])
+        elif raw_id.startswith('dir-'):
+            is_direct = True
+            item_id = int(raw_id[4:])
+        else:
             num = int(raw_id)
             if ResaleListing.objects.filter(pk=num).exists():
                 is_resale = True
@@ -62,8 +61,8 @@ def create_checkout_order(request):
             elif Ticket.objects.filter(pk=num).exists():
                 is_direct = True
                 item_id = num
-        except ValueError:
-            return Response({'error': 'Invalid inventory identifier.'}, status=status.HTTP_400_BAD_REQUEST)
+    except ValueError:
+        return Response({'error': 'Invalid inventory identifier.'}, status=status.HTTP_400_BAD_REQUEST)
 
     now = timezone.now()
     reservation_window = now + timezone.timedelta(minutes=10)
@@ -394,32 +393,20 @@ def verify_razorpay_payment(request, order_id):
         ticket = order.ticket
 
         if order.order_type == 'RESALE' and order.resale_listing:
-            # Transfer ownership from seller to buyer
             resale_listing = order.resale_listing
             resale_listing.status = 'SOLD'
             resale_listing.save(update_fields=['status'])
-
-            # Invalidate seller's old QR and issue a brand-new QR credential for buyer
             ticket.invalidate_qr_credential()
-            ticket.owner = request.user
-            ticket.attendee_name = order.attendee_name
-            ticket.status = 'ACTIVE'
-            ticket.reserved_by = None
-            ticket.reserved_until = None
-            ticket.generate_qr_credential(force=True)
-            ticket.save()
+        elif not ticket.booking_reference:
+            ticket.booking_reference = f"DIR-{uuid.uuid4().hex[:8].upper()}"
 
-        else:
-            # Direct booking fulfillment
-            ticket.owner = request.user
-            ticket.attendee_name = order.attendee_name
-            if not ticket.booking_reference:
-                ticket.booking_reference = f"DIR-{uuid.uuid4().hex[:8].upper()}"
-            ticket.status = 'ACTIVE'
-            ticket.reserved_by = None
-            ticket.reserved_until = None
-            ticket.generate_qr_credential(force=True)
-            ticket.save()
+        ticket.owner = request.user
+        ticket.attendee_name = order.attendee_name
+        ticket.status = 'ACTIVE'
+        ticket.reserved_by = None
+        ticket.reserved_until = None
+        ticket.generate_qr_credential(force=True)
+        ticket.save()
 
         order.status = 'COMPLETED'
         order.save(update_fields=['status'])
@@ -455,7 +442,7 @@ def get_order_history(request):
     """Returns order history for the authenticated buyer."""
     orders = Order.objects.filter(
         buyer=request.user
-    ).select_related('ticket', 'ticket__event', 'ticket__event__provider').order_by('-created_at')
+    ).select_related('ticket', 'ticket__event', 'ticket__event__provider')
 
     results = []
     for o in orders:

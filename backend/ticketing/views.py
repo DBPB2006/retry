@@ -10,6 +10,10 @@ from .models import Ticket
 
 def _serialize_ticket(t):
     """Formats an owned Ticket instance into a JSON-serializable dictionary."""
+    if not t.qr_token and t.status in ('ACTIVE', 'LISTED'):
+        t.generate_qr_credential()
+        t.save()
+
     ev = t.event
     pr = ev.provider
     resale = getattr(t, 'resale_listing', None)
@@ -46,22 +50,12 @@ def _serialize_ticket(t):
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
 def list_user_tickets(request):
-    """
-    Returns all tickets owned by the authenticated user in their Ticket Vault.
-    Includes active, listed for resale, and used tickets.
-    """
+    """Returns all tickets owned by the authenticated user in their Ticket Vault."""
     tickets = Ticket.objects.filter(
         owner=request.user
-    ).select_related('event', 'event__provider', 'resale_listing').order_by('-created_at')
+    ).select_related('event', 'event__provider', 'resale_listing')
 
-    results = []
-    for t in tickets:
-        # Ensure QR credential exists for active ticket
-        if not t.qr_token and t.status in ('ACTIVE', 'LISTED'):
-            t.generate_qr_credential()
-            t.save()
-        results.append(_serialize_ticket(t))
-
+    results = [_serialize_ticket(t) for t in tickets]
     return Response({
         'count': len(results),
         'tickets': results
@@ -76,10 +70,6 @@ def ticket_detail(request, pk):
         t = Ticket.objects.select_related('event', 'event__provider', 'resale_listing').get(pk=pk, owner=request.user)
     except Ticket.DoesNotExist:
         return Response({'error': 'Ticket not found in your vault.'}, status=status.HTTP_404_NOT_FOUND)
-
-    if not t.qr_token and t.status in ('ACTIVE', 'LISTED'):
-        t.generate_qr_credential()
-        t.save()
 
     return Response({'ticket': _serialize_ticket(t)})
 
@@ -104,24 +94,23 @@ def list_eligible_resale_tickets(request):
         event__start_time__gt=timezone.now()
     ).select_related('event', 'event__provider').order_by('event__start_time')
 
-    results = []
-    for t in tickets:
-        ev = t.event
-        pr = ev.provider
-        results.append({
+    results = [
+        {
             'id': t.id,
             'ticket_ref': t.ticket_ref,
             'booking_reference': t.booking_reference,
-            'title': ev.title,
-            'category': ev.category,
-            'provider_name': pr.name,
-            'venue_or_route': ev.venue_or_route,
+            'title': t.event.title,
+            'category': t.event.category,
+            'provider_name': t.event.provider.name,
+            'venue_or_route': t.event.venue_or_route,
             'seat_or_coach': t.seat_or_coach,
-            'event_date': ev.start_time.isoformat(),
+            'event_date': t.event.start_time.isoformat(),
             'face_value': str(t.face_value),
             'max_allowed_resale_price': str((t.face_value * Decimal('1.20')).quantize(Decimal('0.01'))),
             'attendee_name': t.attendee_name,
-        })
+        }
+        for t in tickets
+    ]
 
     return Response({
         'count': len(results),
@@ -171,7 +160,7 @@ def verify_qr_credential(request, token):
         })
 
     # Optional admit / check-in action
-    action = request.GET.get('action') or (request.data.get('action') if request.method == 'POST' else None)
+    action = request.data.get('action') if request.method == 'POST' else request.GET.get('action')
     if action == 'admit':
         ticket.status = 'USED'
         ticket.used_at = timezone.now()

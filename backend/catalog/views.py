@@ -1,4 +1,4 @@
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from django.db import transaction
 from django.db.models import Q
 from django.utils import timezone
@@ -7,7 +7,7 @@ from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 
-from ticketing.models import Provider, Event, Ticket, ResaleListing
+from ticketing.models import Provider, Ticket, ResaleListing
 
 
 @api_view(['GET'])
@@ -30,14 +30,13 @@ def list_categories(request):
 @permission_classes([AllowAny])
 def list_providers(request):
     """Returns active providers, optionally filtered by category."""
-    category = request.GET.get('category', '').strip()
+    category = request.GET.get('category', '').strip().lower()
     qs = Provider.objects.filter(is_active=True)
-    if category and category.lower() != 'all':
-        qs = qs.filter(category=category.lower())
-    
-    results = []
-    for p in qs:
-        results.append({
+    if category and category != 'all':
+        qs = qs.filter(category=category)
+
+    results = [
+        {
             'id': p.id,
             'name': p.name,
             'slug': p.slug,
@@ -46,7 +45,9 @@ def list_providers(request):
             'description': p.description,
             'logo_url': p.logo_url,
             'website': p.website,
-        })
+        }
+        for p in qs
+    ]
     return Response({'providers': results})
 
 
@@ -64,7 +65,7 @@ def _cleanup_expired_reservations():
     expired_resales = ResaleListing.objects.filter(
         status='RESERVED',
         reserved_until__lt=now
-    )
+    ).select_related('ticket')
     for r in expired_resales:
         r.status = 'ACTIVE'
         r.reserved_by = None
@@ -161,6 +162,24 @@ def list_marketplace_listings(request):
     max_price = request.GET.get('max_price')
     sort = request.GET.get('sort', 'date_asc')
 
+    parsed_min_price = None
+    if min_price:
+        try:
+            val = Decimal(str(min_price).strip())
+            if val.is_finite():
+                parsed_min_price = val
+        except (InvalidOperation, TypeError):
+            pass
+
+    parsed_max_price = None
+    if max_price:
+        try:
+            val = Decimal(str(max_price).strip())
+            if val.is_finite():
+                parsed_max_price = val
+        except (InvalidOperation, TypeError):
+            pass
+
     results = []
 
     # 1. DIRECT BOOKING INVENTORY (Pre-created provider tickets)
@@ -182,16 +201,10 @@ def list_marketplace_listings(request):
                 Q(event__provider__name__icontains=q) |
                 Q(seat_or_coach__icontains=q)
             )
-        if min_price:
-            try:
-                direct_tickets = direct_tickets.filter(face_value__gte=Decimal(min_price))
-            except Exception:
-                pass
-        if max_price:
-            try:
-                direct_tickets = direct_tickets.filter(face_value__lte=Decimal(max_price))
-            except Exception:
-                pass
+        if parsed_min_price is not None:
+            direct_tickets = direct_tickets.filter(face_value__gte=parsed_min_price)
+        if parsed_max_price is not None:
+            direct_tickets = direct_tickets.filter(face_value__lte=parsed_max_price)
 
         for t in direct_tickets:
             results.append(_format_direct_listing(t))
@@ -213,16 +226,10 @@ def list_marketplace_listings(request):
                 Q(ticket__event__provider__name__icontains=q) |
                 Q(ticket__seat_or_coach__icontains=q)
             )
-        if min_price:
-            try:
-                resales = resales.filter(asking_price__gte=Decimal(min_price))
-            except Exception:
-                pass
-        if max_price:
-            try:
-                resales = resales.filter(asking_price__lte=Decimal(max_price))
-            except Exception:
-                pass
+        if parsed_min_price is not None:
+            resales = resales.filter(asking_price__gte=parsed_min_price)
+        if parsed_max_price is not None:
+            resales = resales.filter(asking_price__lte=parsed_max_price)
 
         for r in resales:
             results.append(_format_resale_listing(r))
@@ -312,9 +319,9 @@ def create_resale_listing(request):
 
     try:
         asking_price = Decimal(str(asking_price_raw))
-        if asking_price <= 0:
+        if not asking_price.is_finite() or asking_price <= 0:
             raise ValueError()
-    except Exception:
+    except (InvalidOperation, TypeError, ValueError):
         return Response({'error': 'Please provide a valid positive asking price.'}, status=status.HTTP_400_BAD_REQUEST)
 
     with transaction.atomic():
@@ -438,7 +445,7 @@ def withdraw_resale_listing(request, pk):
             listing = ResaleListing.objects.select_for_update().select_related('ticket').get(
                 pk=pk_str, seller=request.user
             )
-        except ResaleListing.DoesNotExist:
+        except (ResaleListing.DoesNotExist, ValueError):
             return Response({'error': 'Listing not found.'}, status=status.HTTP_404_NOT_FOUND)
 
         if listing.status != 'ACTIVE':

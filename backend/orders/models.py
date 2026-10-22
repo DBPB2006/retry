@@ -18,7 +18,7 @@ class Order(models.Model):
         ('CANCELLED', 'Cancelled / Reservation Expired'),
     ]
 
-    order_number = models.CharField(max_length=64, unique=True, db_index=True)
+    order_number = models.CharField(max_length=64, unique=True)
     buyer = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='orders')
     order_type = models.CharField(max_length=20, choices=ORDER_TYPE_CHOICES, default='DIRECT')
 
